@@ -10,16 +10,21 @@ import (
 	"net/url"
 	"os"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/tylerb/graceful"
+	"github.com/yosisa/sigm"
 	"github.com/yosisa/webutil"
 )
 
 var (
 	listen          = flag.String("listen", ":8080", "Listen address")
 	gracefulTimeout = flag.Duration("graceful-timeout", 10*time.Second, "Wait until force shutdown")
+	accessLog       = flag.String("access-log", "-", "Path to access log file")
 )
+
+var accessLogWriter = new(webutil.ConsoleLogWriter)
 
 type duproxy struct {
 	primary     *url.URL
@@ -98,6 +103,24 @@ func (d *duproxy) copyResponse(dst io.Writer, src io.ReadCloser) {
 	src.Close()
 }
 
+func openAccessLog() {
+	if *accessLog == "-" {
+		accessLogWriter.Swap(os.Stdout)
+		return
+	}
+	f, err := os.OpenFile(*accessLog, os.O_CREATE|os.O_RDWR|os.O_APPEND, 0666)
+	if err != nil {
+		log.Print(err)
+		return
+	}
+	if old := accessLogWriter.Swap(f); old != nil {
+		if ic, ok := old.(io.Closer); ok {
+			ic.Close()
+		}
+		log.Print("Reopen access log file")
+	}
+}
+
 func main() {
 	flag.Parse()
 	args := flag.Args()
@@ -108,9 +131,12 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
-	h := webutil.Logger(dp, webutil.ConsoleLogWriter(os.Stdout))
-	h = webutil.Recoverer(h, os.Stderr)
-	graceful.Run(*listen, *gracefulTimeout, h)
+
+	openAccessLog()
+	h := webutil.Logger(dp, accessLogWriter)
+	sigm.Handle(syscall.SIGHUP, openAccessLog)
+
+	graceful.Run(*listen, *gracefulTimeout, webutil.Recoverer(h, os.Stderr))
 }
 
 func init() {
